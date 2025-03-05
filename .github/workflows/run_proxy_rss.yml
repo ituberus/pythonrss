@@ -3,7 +3,7 @@ name: Run Proxy RSS Script
 on:
   # Schedule the workflow to run every 10 minutes (UTC)
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '*/5 * * * *'
   # Allows manual triggering via the GitHub Actions tab
   workflow_dispatch:
 
