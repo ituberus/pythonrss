@@ -1,3 +1,4 @@
+import os
 import requests
 import random
 import time
@@ -317,7 +318,12 @@ def update_github_rss_feed(rss_content):
     The content is completely replaced with the new data.
     """
     # ======= CONFIGURATION (UPDATED) =======
-    GITHUB_TOKEN = "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"
+    # The GitHub token is now retrieved from an environment variable.
+    GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
+    if not GITHUB_TOKEN:
+        print("Error: GITHUB_TOKEN environment variable is not set.")
+        return
+
     REPO_OWNER = "ituberus"        # Your GitHub username
     REPO_NAME = "Rdmansi"          # The repository name
     FILE_PATH = "rss.xml"          # The file to update
