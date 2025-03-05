@@ -5,6 +5,10 @@ import base64
 import json
 from bs4 import BeautifulSoup
 
+# Define a custom User-Agent for all HTTP requests
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+HEADERS = {"User-Agent": USER_AGENT}
+
 ###############################################################################
 # 1) FREEPROXY.WORLD SCRAPER (ORIGINAL LOGIC)
 ###############################################################################
@@ -16,7 +20,7 @@ def get_jp_proxies_from_freeproxy_world():
     """
     url = "https://www.freeproxy.world/?country=JP"
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, headers=HEADERS, timeout=10)
         response.raise_for_status()
     except Exception as e:
         print("Error fetching freeproxy.world page:", e)
@@ -77,7 +81,7 @@ def get_jp_proxies_from_proxyscrape():
     for proto_param, proto_type in protocols:
         url = f"{base_url}&protocol={proto_param}"
         try:
-            resp = requests.get(url, timeout=10)
+            resp = requests.get(url, headers=HEADERS, timeout=10)
             resp.raise_for_status()
             lines = resp.text.strip().splitlines()
             for line in lines:
@@ -109,7 +113,7 @@ def get_jp_proxies_from_proxyscan():
     url = "https://www.proxyscan.io/api/proxy?country=JP&type=http,https,socks4,socks5&limit=20&format=json"
     proxies_list = []
     try:
-        resp = requests.get(url, timeout=10)
+        resp = requests.get(url, headers=HEADERS, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         for entry in data:
@@ -146,7 +150,7 @@ def get_jp_proxies_from_pubproxy():
     # HTTP proxies that support HTTPS
     try:
         url_http = f"{base_url}?country=JP&limit=20&type=http&https=true&format=json"
-        resp = requests.get(url_http, timeout=10)
+        resp = requests.get(url_http, headers=HEADERS, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         for item in data.get("data", []):
@@ -164,7 +168,7 @@ def get_jp_proxies_from_pubproxy():
     # SOCKS4
     try:
         url_socks4 = f"{base_url}?country=JP&limit=20&type=socks4&format=json"
-        resp = requests.get(url_socks4, timeout=10)
+        resp = requests.get(url_socks4, headers=HEADERS, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         for item in data.get("data", []):
@@ -182,7 +186,7 @@ def get_jp_proxies_from_pubproxy():
     # SOCKS5
     try:
         url_socks5 = f"{base_url}?country=JP&limit=20&type=socks5&format=json"
-        resp = requests.get(url_socks5, timeout=10)
+        resp = requests.get(url_socks5, headers=HEADERS, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         for item in data.get("data", []):
@@ -215,7 +219,7 @@ def get_jp_proxies_from_getproxylist(num_requests=10):
 
     for _ in range(num_requests):
         try:
-            resp = requests.get(base_url, timeout=10)
+            resp = requests.get(base_url, headers=HEADERS, timeout=10)
             resp.raise_for_status()
             data = resp.json()
 
@@ -265,7 +269,7 @@ def fetch_rss_with_proxy(rss_url, proxy_data):
     }
     try:
         print(f"  Trying {proxy_type.upper()} proxy {ip}:{port} ...")
-        response = requests.get(rss_url, proxies=proxies, timeout=15)
+        response = requests.get(rss_url, headers=HEADERS, proxies=proxies, timeout=15)
         response.raise_for_status()
         content = response.text
         if "<dc:date>" not in content:
@@ -317,19 +321,19 @@ def update_github_rss_feed(rss_content):
     REPO_OWNER = "ituberus"        # Your GitHub username
     REPO_NAME = "Rdmansi"          # The repository name
     FILE_PATH = "rss.xml"          # The file to update
-    BRANCH = "master"
-                # The branch to commit to
+    BRANCH = "master"              # The branch to commit to
     # =========================================
 
     # GitHub API URL for file contents
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{FILE_PATH}"
-    headers = {
+    headers_github = {
         "Authorization": f"token {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3+json"
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": USER_AGENT
     }
 
     # Check if the file already exists to retrieve its SHA
-    response = requests.get(url, headers=headers)
+    response = requests.get(url, headers=headers_github)
     if response.status_code == 200:
         file_info = response.json()
         sha = file_info.get("sha")
@@ -349,7 +353,7 @@ def update_github_rss_feed(rss_content):
     if sha:
         data["sha"] = sha
 
-    put_response = requests.put(url, headers=headers, data=json.dumps(data))
+    put_response = requests.put(url, headers=headers_github, data=json.dumps(data))
     if put_response.status_code in (200, 201):
         print("Successfully updated the GitHub repository with the new RSS feed.")
     else:
