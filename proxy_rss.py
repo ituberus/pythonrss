@@ -319,9 +319,9 @@ def update_github_rss_feed(rss_content):
     """
     # ======= CONFIGURATION (UPDATED) =======
     # The GitHub token is now retrieved from an environment variable.
-    GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
-    if not GITHUB_TOKEN:
-        print("Error: GITHUB_TOKEN environment variable is not set.")
+    OLAMIDE = os.environ.get("OLAMIDE")
+    if not OLAMIDE:
+        print("Error: OLAMIDE environment variable is not set.")
         return
 
     REPO_OWNER = "ituberus"        # Your GitHub username
@@ -333,7 +333,7 @@ def update_github_rss_feed(rss_content):
     # GitHub API URL for file contents
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{FILE_PATH}"
     headers_github = {
-        "Authorization": f"token {GITHUB_TOKEN}",
+        "Authorization": f"token {OLAMIDE}",
         "Accept": "application/vnd.github.v3+json",
         "User-Agent": USER_AGENT
     }
