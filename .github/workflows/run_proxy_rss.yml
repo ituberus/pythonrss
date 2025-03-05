@@ -1,0 +1,31 @@
+name: Run Proxy RSS Script
+
+on:
+  # Schedule the workflow to run every 10 minutes (UTC)
+  schedule:
+    - cron: '*/10 * * * *'
+  # Allows manual triggering via the GitHub Actions tab
+  workflow_dispatch:
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run the Script
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          python proxy_rss.py
