@@ -317,7 +317,7 @@ def update_github_rss_feed(rss_content):
     The content is completely replaced with the new data.
     """
     # ======= CONFIGURATION (UPDATED) =======
-    GITHUB_TOKEN = "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"
+    GITHUB_TOKEN = "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"
     REPO_OWNER = "ituberus"        # Your GitHub username
     REPO_NAME = "Rdmansi"          # The repository name
     FILE_PATH = "rss.xml"          # The file to update
