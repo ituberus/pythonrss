@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>User Management - RiskPay Admin</title>
+  <link rel="stylesheet" href="../css/main.css">
+  <style>
+    /* Simple modal styling */
+    .modal {
+      display: none;
+      position: fixed;
+      z-index: 1000;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(0, 0, 0, 0.5);
+    }
+    
+    .modal-content {
+      background-color: white;
+      margin: 10% auto;
+      padding: 20px;
+      width: 80%;
+      max-width: 600px;
+      border-radius: 5px;
+    }
+    
+    .close-modal {
+      float: right;
+      cursor: pointer;
+      font-size: 20px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div id="alert-container"></div>
+    
+    <header>
+      <h1>User Management</h1>
+    </header>
+    
+    <div class="card" style="margin-bottom: 20px;">
+      <h3>Filter Users</h3>
+      <form id="user-search-form">
+        <div class="row">
+          <div class="col">
+            <div class="form-group">
+              <label for="filter-status">Status</label>
+              <select id="filter-status">
+                <option value="all">All</option>
+                <option value="active">Active</option>
+                <option value="suspended">Suspended</option>
+                <option value="blocked">Blocked</option>
+                <option value="verified">Verified</option>
+                <option value="pending">Pending Verification</option>
+                <option value="rejected">Rejected Verification</option>
+              </select>
+            </div>
+          </div>
+          <div class="col">
+            <div class="form-group">
+              <label for="search-query">Search</label>
+              <input type="text" id="search-query" placeholder="Email or merchant name">
+            </div>
+          </div>
+        </div>
+        
+        <div>
+          <button type="submit">Search</button>
+          <button type="button" id="reset-search-btn">Reset</button>
+        </div>
+      </form>
+    </div>
+    
+    <div id="users-list">
+      <!-- Users will be loaded here -->
+    </div>
+    
+    <!-- Suspend User Modal -->
+    <div id="suspend-user-modal" class="modal">
+      <div class="modal-content">
+        <span class="close-modal">&times;</span>
+        <h2>Suspend User</h2>
+        
+        <form id="suspend-user-form">
+          <input type="hidden" id="suspend-user-id">
+          
+          <div class="form-group">
+            <label for="suspend-until">Suspend Until</label>
+            <input type="date" id="suspend-until" required>
+            <small>User will be automatically reactivated after this date</small>
+          </div>
+          
+          <button type="submit">Suspend User</button>
+        </form>
+      </div>
+    </div>
+  </div>
+  
+  <script src="../js/utils.js"></script>
+  <script src="../js/admin.js"></script>
+</body>
+</html>

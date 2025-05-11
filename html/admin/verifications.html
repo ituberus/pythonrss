@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Verifications - RiskPay Admin</title>
+  <link rel="stylesheet" href="../css/main.css">
+</head>
+<body>
+  <div class="container">
+    <div id="alert-container"></div>
+    
+    <header>
+      <h1>Merchant Verifications</h1>
+    </header>
+    
+    <div class="card" style="margin-bottom: 20px;">
+      <div class="row">
+        <div class="col">
+          <button id="pending-tab" class="button">Pending Verifications</button>
+        </div>
+        <div class="col">
+          <button id="rejected-tab" class="button">Rejected Verifications</button>
+        </div>
+      </div>
+    </div>
+    
+    <div id="verifications-list">
+      <!-- Verifications will be loaded here -->
+    </div>
+  </div>
+  
+  <script src="../js/utils.js"></script>
+  <script src="../js/admin.js"></script>
+</body>
+</html>

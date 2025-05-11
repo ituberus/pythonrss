@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>User Details - RiskPay Admin</title>
+  <link rel="stylesheet" href="../css/main.css">
+  <style>
+    /* Simple modal styling */
+    .modal {
+      display: none;
+      position: fixed;
+      z-index: 1000;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(0, 0, 0, 0.5);
+    }
+    
+    .modal-content {
+      background-color: white;
+      margin: 10% auto;
+      padding: 20px;
+      width: 80%;
+      max-width: 600px;
+      border-radius: 5px;
+    }
+    
+    .close-modal {
+      float: right;
+      cursor: pointer;
+      font-size: 20px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div id="alert-container"></div>
+    
+    <header>
+      <h1>User Details</h1>
+      <a href="users.html" class="button">Back to Users</a>
+    </header>
+    
+    <div id="user-details">
+      <!-- User details will be loaded here -->
+    </div>
+    
+    <!-- Suspend User Modal -->
+    <div id="suspend-user-modal" class="modal">
+      <div class="modal-content">
+        <span class="close-modal">&times;</span>
+        <h2>Suspend User</h2>
+        
+        <form id="suspend-user-form">
+          <input type="hidden" id="suspend-user-id">
+          
+          <div class="form-group">
+            <label for="suspend-until">Suspend Until</label>
+            <input type="date" id="suspend-until" required>
+            <small>User will be automatically reactivated after this date</small>
+          </div>
+          
+          <button type="submit">Suspend User</button>
+        </form>
+      </div>
+    </div>
+    
+    <!-- Edit User Modal -->
+    <div id="edit-user-modal" class="modal">
+      <div class="modal-content">
+        <span class="close-modal">&times;</span>
+        <h2>Edit User</h2>
+        
+        <form id="edit-user-form">
+          <input type="hidden" id="edit-user-id">
+          
+          <div class="form-group">
+            <label for="edit-user-email">Email</label>
+            <input type="email" id="edit-user-email">
+          </div>
+          
+          <div class="form-group">
+            <label for="edit-user-role">Role</label>
+            <select id="edit-user-role">
+              <option value="merchant">Merchant</option>
+              <option value="admin">Admin</option>
+            </select>
+          </div>
+          
+          <div class="form-group">
+            <label for="edit-user-status">Status</label>
+            <select id="edit-user-status">
+              <option value="active">Active</option>
+              <option value="suspended">Suspended</option>
+              <option value="blocked">Blocked</option>
+            </select>
+          </div>
+          
+          <div class="form-group">
+            <label for="edit-user-id-check-status">ID Verification Status</label>
+            <select id="edit-user-id-check-status">
+              <option value="">Not Started</option>
+              <option value="pending">Pending</option>
+              <option value="verified">Verified</option>
+              <option value="rejected">Rejected</option>
+            </select>
+          </div>
+          
+          <div class="form-group">
+            <label for="edit-user-email-verified">Email Verified</label>
+            <select id="edit-user-email-verified">
+              <option value="true">Yes</option>
+              <option value="false">No</option>
+            </select>
+          </div>
+          
+          <div class="form-group">
+            <label for="edit-user-business-name">Business Name</label>
+            <input type="text" id="edit-user-business-name">
+          </div>
+          
+          <div class="form-group">
+            <label for="edit-user-country">Country</label>
+            <select id="edit-user-country">
+              <option value="US">United States</option>
+              <option value="BR">Brazil</option>
+            </select>
+          </div>
+          
+          <div class="form-group">
+            <label for="edit-user-selling-method">Selling Method</label>
+            <select id="edit-user-selling-method">
+              <option value="hosted_store">Hosted Store</option>
+              <option value="integration">Integration</option>
+            </select>
+          </div>
+          
+          <button type="submit" id="update-user-btn">Update User</button>
+        </form>
+      </div>
+    </div>
+  </div>
+  
+  <script src="../js/utils.js"></script>
+  <script src="../js/admin.js"></script>
+</body>
+</html>

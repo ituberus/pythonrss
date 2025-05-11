@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin Login - RiskPay</title>
+  <link rel="stylesheet" href="css/main.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>RiskPay Admin</h1>
+      <nav>
+        <ul>
+          <li><a href="login.html">Merchant Login</a></li>
+        </ul>
+      </nav>
+    </header>
+    
+    <div id="alert-container"></div>
+    
+    <div class="card" style="max-width: 500px; margin: 0 auto;">
+      <h2>Admin Login</h2>
+      <form id="admin-login-form">
+        <div class="form-group">
+          <label for="username">Username</label>
+          <input type="text" id="username" required>
+        </div>
+        
+        <div class="form-group">
+          <label for="password">Password</label>
+          <input type="password" id="password" required>
+        </div>
+        
+        <div class="form-group">
+          <label for="access-key">Access Key (optional, required for full access)</label>
+          <input type="password" id="access-key">
+        </div>
+        
+        <button type="submit" id="login-btn">Login</button>
+      </form>
+      
+      <p style="margin-top: 20px;">
+        <a href="login.html">Go to Merchant Login</a>
+      </p>
+    </div>
+  </div>
+  
+  <script src="js/utils.js"></script>
+  <script src="js/auth.js"></script>
+</body>
+</html>

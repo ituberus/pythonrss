@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FX Rates - RiskPay Admin</title>
+  <link rel="stylesheet" href="../css/main.css">
+  <style>
+    /* Simple modal styling */
+    .modal {
+      display: none;
+      position: fixed;
+      z-index: 1000;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(0, 0, 0, 0.5);
+    }
+    
+    .modal-content {
+      background-color: white;
+      margin: 10% auto;
+      padding: 20px;
+      width: 80%;
+      max-width: 600px;
+      border-radius: 5px;
+    }
+    
+    .close-modal {
+      float: right;
+      cursor: pointer;
+      font-size: 20px;
+    }
+    
+    .fx-card {
+      background-color: #f9f9f9;
+      border: 1px solid #ddd;
+      padding: 15px;
+      margin-bottom: 15px;
+      border-radius: 5px;
+    }
+    
+    .fx-action-buttons {
+      margin-top: 15px;
+      display: flex;
+      gap: 10px;
+    }
+    
+    .rate-history {
+      margin-top: 20px;
+    }
+    
+    .rate-history table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    
+    .rate-history th, .rate-history td {
+      border: 1px solid #ddd;
+      padding: 8px;
+      text-align: left;
+    }
+    
+    .rate-history th {
+      background-color: #f2f2f2;
+    }
+    
+    .rate-history tr:nth-child(even) {
+      background-color: #f9f9f9;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div id="alert-container"></div>
+    
+    <header>
+      <h1>FX Rates Management</h1>
+      <nav>
+        <ul>
+          <li><a href="index.html">Dashboard</a></li>
+          <li><a href="users.html">Users</a></li>
+        </ul>
+      </nav>
+    </header>
+    
+    <section class="section">
+      <h2>Current FX Settings</h2>
+      <div class="card" id="fx-settings-card">
+        <!-- FX settings will be loaded here -->
+        <div class="loading">Loading settings...</div>
+      </div>
+      
+      <button id="edit-settings-btn" class="button">Edit FX Settings</button>
+    </section>
+    
+    <section class="section">
+      <h2>Active Exchange Rates</h2>
+      <div id="fx-rates-container">
+        <!-- FX rates will be loaded here -->
+        <div class="loading">Loading rates...</div>
+      </div>
+      
+      <div class="fx-action-buttons">
+        <button id="add-rate-btn" class="button">Add New Rate</button>
+        <button id="refresh-all-rates-btn" class="button">Refresh All Rates</button>
+      </div>
+    </section>
+    
+    <!-- Edit FX Settings Modal -->
+    <div id="edit-settings-modal" class="modal">
+      <div class="modal-content">
+        <span class="close-modal">&times;</span>
+        <h2>Edit FX Settings</h2>
+        
+        <form id="edit-settings-form">
+          <div class="form-group">
+            <label for="default-spread">Default FX Spread (%)</label>
+            <input type="number" id="default-spread" min="0" max="10" step="0.1" required>
+            <small>Default spread percentage applied to all currency conversions (0-10%)</small>
+          </div>
+          
+          <div class="form-group">
+            <label>
+              <input type="checkbox" id="auto-fx-update"> Enable Automatic FX Updates
+            </label>
+            <small>When enabled, FX rates will be automatically updated daily from external sources</small>
+          </div>
+          
+          <button type="submit" id="update-settings-btn">Update Settings</button>
+        </form>
+      </div>
+    </div>
+    
+    <!-- Add New Rate Modal -->
+    <div id="add-rate-modal" class="modal">
+      <div class="modal-content">
+        <span class="close-modal">&times;</span>
+        <h2>Add New Exchange Rate</h2>
+        
+        <form id="add-rate-form">
+          <div class="form-group">
+            <label for="base-currency">Base Currency</label>
+            <select id="base-currency" required>
+              <option value="USD">USD</option>
+              <option value="BRL">BRL</option>
+            </select>
+          </div>
+          
+          <div class="form-group">
+            <label for="quote-currency">Quote Currency</label>
+            <select id="quote-currency" required>
+              <option value="BRL">BRL</option>
+              <option value="USD">USD</option>
+            </select>
+          </div>
+          
+          <div class="form-group">
+            <label for="rate-value">Exchange Rate</label>
+            <input type="number" id="rate-value" min="0.000001" step="0.000001" required>
+            <small>Rate for converting from Base to Quote currency</small>
+          </div>
+          
+          <button type="submit" id="submit-rate-btn">Add Rate</button>
+        </form>
+      </div>
+    </div>
+  </div>
+  
+  <script src="../js/utils.js"></script>
+  <script src="../js/admin.js"></script>
+  <script src="../js/admin-fx.js"></script>
+</body>
+</html>

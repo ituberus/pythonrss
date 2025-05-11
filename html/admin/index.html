@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin Dashboard - RiskPay</title>
+  <link rel="stylesheet" href="../css/main.css">
+</head>
+<body>
+  <div class="container">
+    <div id="alert-container"></div>
+    
+    <header>
+      <h1>Admin Dashboard</h1>
+    </header>
+    
+    <div class="row">
+      <div class="col">
+        <div class="card">
+          <h3>Pending Verifications</h3>
+          <p>There are <span id="pending-verifications-count">0</span> verifications awaiting review.</p>
+          <a href="verifications.html" class="button">View Verifications</a>
+        </div>
+      </div>
+      
+      <div class="col">
+        <div class="card">
+          <h3>User Management</h3>
+          <div id="user-stats">
+            <!-- User stats will be loaded here -->
+          </div>
+          <a href="users.html" class="button">Manage Users</a>
+        </div>
+      </div>
+    </div>
+    
+    <div id="admin-dashboard-data">
+      <!-- Other dashboard data will be loaded here -->
+    </div>
+  </div>
+  
+  <script src="../js/utils.js"></script>
+  <script src="../js/admin.js"></script>
+</body>
+</html>

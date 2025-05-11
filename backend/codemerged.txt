@@ -1,0 +1,2743 @@
+src/app.ts
+// backend/src/app.ts
+import express, { Application } from 'express';
+import cors from 'cors';
+import path from 'path';
+import helmet from 'helmet'; // Security middleware
+import rateLimit from 'express-rate-limit'; // Rate limiting
+import hpp from 'hpp'; // HTTP Parameter Pollution protection
+import config from './config/default';
+import authRoutes from './routes/auth.routes';
+import onboardingRoutes from './routes/onboarding.routes';
+import verificationRoutes from './routes/verification.routes';
+import adminRoutes from './routes/admin.routes';
+import commerceRoutes from './modules/commerce'; // New commerce routes
+import { notFoundHandler, errorHandler } from './middlewares/error.middleware';
+
+const app: Application = express();
+
+// Security middleware
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" } // Allow cross-origin resource sharing for images
+}));
+
+// HTTP Parameter Pollution protection
+app.use(hpp());
+
+// Global rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 200, // limit each IP to 200 requests per windowMs
+  message: 'Too many requests from this IP, please try again later'
+});
+
+app.use(limiter);
+
+// More aggressive rate limiting for auth routes
+const authLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 10, // limit each IP to 10 requests per windowMs
+  message: 'Too many authentication attempts, please try again later'
+});
+
+// Middleware
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// CORS configuration
+app.use(
+  cors({
+    origin: config.frontendUrl,
+    credentials: true,
+    exposedHeaders: ['Content-Type', 'Authorization']
+  })
+);
+
+// Serve static files from the uploads directory - BOTH WITH AND WITHOUT /api prefix
+const staticFileOpts = {
+  setHeaders: (res: express.Response) => {
+    res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.set('Access-Control-Allow-Origin', '*');
+  }
+};
+
+// Serve from /uploads (for new images)
+app.use('/uploads', express.static(path.join(__dirname, '../uploads'), staticFileOpts));
+
+// Also serve from /api/uploads (for existing images)
+app.use('/api/uploads', express.static(path.join(__dirname, '../uploads'), staticFileOpts));
+
+// API Routes with rate limits where needed
+app.use('/api/auth', authLimiter, authRoutes);
+app.use('/api/onboarding', onboardingRoutes);
+app.use('/api/verification', verificationRoutes);
+app.use('/api/admin', adminRoutes);
+
+// Add new commerce routes
+app.use('/api', commerceRoutes);
+
+// In production, serve the frontend
+if (process.env.NODE_ENV === 'production') {
+  // Serve static files
+  app.use(express.static(path.join(__dirname, '../../frontend/out')));
+
+  // All other requests go to the React app
+  app.get('*', (req, res) => {
+    res.sendFile(path.resolve(__dirname, '../../frontend/out/index.html'));
+  });
+}
+
+// Error handling middleware - use 'as any' to bypass TypeScript strict checking
+// This is an acceptable workaround for Express middleware in TypeScript
+app.use(notFoundHandler as any);
+app.use(errorHandler as any);
+
+export default app;
+
+src/server.ts
+// src/server.ts
+import app from './app';
+import config from './config/default';
+import connectDB from './config/db';
+import logger from './utils/logger';
+import InitService from './services/init.service';
+
+const PORT = config.port;
+
+// Start server
+const startServer = async () => {
+  try {
+    // Connect to MongoDB
+    await connectDB();
+    
+    // Initialize application settings and services
+    await InitService.initialize();
+
+    // Start Express server
+    app.listen(PORT, () => {
+      logger.info(`Server running in ${config.nodeEnv} mode on port ${PORT}`);
+    });
+  } catch (error) {
+    logger.error('Failed to start server:', error);
+    process.exit(1);
+  }
+};
+
+startServer();
+
+src/config/default.ts
+import dotenv from 'dotenv';
+dotenv.config();
+
+export default {
+  port: process.env.PORT || 5000,
+  mongoURI: process.env.MONGODB_URI || 'mongodb://localhost:27017/riskpay',
+  jwtSecret: process.env.JWT_SECRET || 'your_jwt_secret_key_change_this_in_production',
+  nodeEnv: process.env.NODE_ENV || 'development',
+  defaultTimezone: process.env.DEFAULT_TIMEZONE || 'America/Sao_Paulo',
+  frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
+  emailFrom: process.env.EMAIL_FROM || 'noreply@riskpay.com',
+  holdDays: 14, // Default days to hold funds
+  supportedCountries: ['US', 'BR'], // Available countries for merchants
+};
+
+src/config/db.ts
+import mongoose from 'mongoose';
+import config from './default';
+import logger from '../utils/logger';
+
+const connectDB = async (): Promise<void> => {
+  try {
+    await mongoose.connect(config.mongoURI);
+    logger.info('MongoDB connected successfully');
+  } catch (error) {
+    logger.error('MongoDB connection failed:', error);
+    process.exit(1);
+  }
+};
+
+export default connectDB;
+
+src/controllers/product.controller.ts
+// src/controllers/product.controller.ts
+import { Request, Response } from 'express';
+import { successResponse, errorResponse } from '../utils/response';
+import ProductService from '../services/product.service';
+import NotificationService from '../services/notification.service';
+import logger from '../utils/logger';
+import fs from 'fs';
+import path from 'path';
+
+/**
+ * Standardize image URLs for consistency
+ * This fixes the issue with URLs being inconsistently formatted
+ * @param path The image path or filename
+ * @returns Standardized URL path
+ */
+function standardizeImagePath(path: string): string {
+  // If it already has /api/uploads or /uploads, leave it as is
+  if (path.startsWith('/api/uploads/') || path.startsWith('/uploads/')) {
+    return path;
+  }
+  
+  // Otherwise, ensure it has /api/uploads/ prefix
+  return `/api/uploads/${path.startsWith('/') ? path.substring(1) : path}`;
+}
+
+/**
+ * Helper function to ensure image URLs are properly constructed
+ * @param imageUrl The raw image URL
+ * @param req Express request object for building full URLs
+ * @returns A properly formatted image URL
+ */
+function formatImageUrl(imageUrl: string, req: Request): string {
+  // If already a full URL, return as is
+  if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) {
+    return imageUrl;
+  }
+
+  // If it's an absolute path starting with /uploads
+  if (imageUrl.startsWith('/uploads/')) {
+    return `${req.protocol}://${req.get('host')}${imageUrl}`;
+  }
+
+  // If it's just a filename or relative path
+  if (!imageUrl.includes('/uploads/')) {
+    return `${req.protocol}://${req.get('host')}/uploads/${imageUrl}`;
+  }
+
+  // Default fallback - prepend host and protocol
+  return `${req.protocol}://${req.get('host')}${imageUrl.startsWith('/') ? '' : '/'}${imageUrl}`;
+}
+
+/**
+ * Helper function to organize uploads by product slug
+ * @param files List of files to organize
+ * @param slug Product slug
+ * @returns List of organized file paths
+ */
+async function organizeFilesBySlug(files: any[], slug: string): Promise<string[]> {
+  try {
+    // Create directory for the product if it doesn't exist
+    const productDir = path.join(__dirname, '../../uploads', slug);
+    
+    if (!fs.existsSync(productDir)) {
+      fs.mkdirSync(productDir, { recursive: true });
+    }
+    
+    const organizedPaths: string[] = [];
+    
+    // Move each file to the product directory
+    for (const file of files) {
+      const oldPath = file.path;
+      const filename = file.filename || path.basename(oldPath);
+      const newPath = path.join(productDir, filename);
+      
+      // Copy file to new location
+      fs.copyFileSync(oldPath, newPath);
+      
+      // Delete old file
+      fs.unlinkSync(oldPath);
+      
+      // Update file path
+      const relativePath = `/uploads/${slug}/${filename}`;
+      organizedPaths.push(relativePath);
+    }
+    
+    return organizedPaths;
+  } catch (error) {
+    logger.error('Error organizing files by slug:', error);
+    return [];
+  }
+}
+
+// Helper function to generate a random slug (10 characters)
+function generateSlug(): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let result = '';
+  for (let i = 0; i < 10; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+
+// @desc    Create a new product
+// @route   POST /api/products
+// @access  Private (merchants only, verified)
+export const createProduct = async (req: Request, res: Response): Promise<Response> => {
+  try {
+    // Log the raw request body for debugging
+    logger.info('Product creation request body:', JSON.stringify(req.body));
+
+    const { 
+      title, 
+      description, 
+      shortDescription, 
+      longDescription, 
+      price, 
+      currency, 
+      type,
+      slug,
+      sku,
+      barcode,
+      isRecurring
+    } = req.body;
+
+    // Check if all required fields are present
+    if (!title || !price || !currency || !type) {
+      logger.info('Missing required fields:', { 
+        hasTitle: !!title, 
+        hasPrice: !!price, 
+        hasCurrency: !!currency, 
+        hasType: !!type 
+      });
+      return errorResponse(res, 'Missing required fields', null, 400);
+    }
+
+    // Generate or use provided slug
+    const productSlug = slug || generateSlug();
+    
+    // Check if slug is already in use
+    const existingProduct = await (ProductService as any).findProductBySlug(productSlug);
+    if (existingProduct) {
+      return errorResponse(res, 'Product slug already in use. Please try a different one.', null, 400);
+    }
+
+    // Create object to hold parsed data
+    const productData: any = {
+      title,
+      // Handle both old and new description fields
+      description: description || shortDescription || '',
+      shortDescription: shortDescription || description || '',
+      longDescription: longDescription || description || '',
+      price: parseFloat(price),
+      currency: currency.toUpperCase(),
+      type,
+      slug: productSlug,
+    };
+    
+    // Add inventory fields if provided
+    if (sku) productData.sku = sku;
+    if (barcode) productData.barcode = barcode;
+
+    // Handle type-specific details
+    if (type === 'digital') {
+      productData.digital = {};
+
+      // Handle file method (URL or upload)
+      const fileMethod = req.body.fileMethod || 'url';
+
+      if (fileMethod === 'url') {
+        const fileUrl = req.body.fileUrl;
+        if (fileUrl) {
+          productData.digital.fileUrl = fileUrl;
+        }
+      } else if (fileMethod === 'upload' && req.files && (req.files as any).digitalFile) {
+        const digitalFile = (req.files as any).digitalFile[0];
+        
+        // Organize file by slug
+        const organizedFiles = await organizeFilesBySlug([(req.files as any).digitalFile[0]], productSlug);
+        if (organizedFiles.length > 0) {
+          productData.digital.fileUpload = organizedFiles[0];
+        } else {
+          productData.digital.fileUpload = digitalFile.filename || digitalFile.path;
+        }
+      }
+
+      // Handle recurring subscription data - explicitly check 'isRecurring' flag
+      const hasRecurring = isRecurring === 'true' || isRecurring === true;
+      if (hasRecurring && req.body.digital) {
+        try {
+          const digitalData = typeof req.body.digital === 'string' 
+            ? JSON.parse(req.body.digital) 
+            : req.body.digital;
+
+          if (digitalData.recurring) {
+            productData.digital.recurring = digitalData.recurring;
+          }
+        } catch (e) {
+          logger.error('Failed to parse digital data:', e);
+        }
+      }
+    } 
+    else if (type === 'physical') {
+      productData.physical = {};
+
+      // Handle stock without variants
+      if (req.body.hasStock === 'true' && req.body.stock) {
+        productData.physical.stock = parseInt(req.body.stock, 10);
+      }
+      
+      // Handle shipping methods
+      if (req.body.shippingMethods) {
+        try {
+          const shippingMethods = typeof req.body.shippingMethods === 'string'
+            ? JSON.parse(req.body.shippingMethods)
+            : req.body.shippingMethods;
+            
+          if (Array.isArray(shippingMethods) && shippingMethods.length > 0) {
+            productData.physical.shippingMethods = shippingMethods;
+          }
+        } catch (e) {
+          logger.error('Failed to parse shipping methods:', e);
+        }
+      }
+
+      // Parse physical data if provided
+      if (req.body.physical) {
+        try {
+          const physicalData = typeof req.body.physical === 'string' 
+            ? JSON.parse(req.body.physical) 
+            : req.body.physical;
+
+          Object.assign(productData.physical, physicalData);
+        } catch (e) {
+          logger.error('Failed to parse physical data:', e);
+        }
+      }
+    }
+
+    // Handle variants
+    if (req.body.variants) {
+      try {
+        productData.variants = typeof req.body.variants === 'string' 
+          ? JSON.parse(req.body.variants) 
+          : req.body.variants;
+      } catch (e) {
+        logger.error('Failed to parse variants data:', e);
+      }
+    }
+
+    // Handle images - limit to 10 max
+    if (req.files && (req.files as any).images) {
+      const imageFiles = Array.isArray((req.files as any).images) 
+        ? (req.files as any).images 
+        : [(req.files as any).images];
+      
+      // Limit to 10 images
+      const limitedImageFiles = imageFiles.slice(0, 10);
+      
+      // Organize images by slug
+      const organizedPaths = await organizeFilesBySlug(limitedImageFiles, productSlug);
+      
+      if (organizedPaths.length > 0) {
+        // Create image objects for organized files
+        productData.images = organizedPaths.map((path, index) => {
+          // Check if this is the main image
+          const isMain = req.body.mainImageIndex 
+            ? parseInt(req.body.mainImageIndex) === index
+            : index === 0; // Default to first image as main
+          
+          return {
+            url: path,
+            isMain: isMain
+          };
+        });
+      } else {
+        // Fallback to original approach if organization fails
+        productData.images = limitedImageFiles.map((file: any, index: number) => {
+          // Check if this is the main image
+          const isMain = req.body.mainImageIndex 
+            ? parseInt(req.body.mainImageIndex) === index
+            : index === 0; // Default to first image as main
+          
+          // Get just the filename part
+          const filename = file.filename || file.originalname;
+          
+          // Create the standardized URL path
+          const imagePath = `/api/uploads/${filename}`;
+          
+          return {
+            url: imagePath,
+            isMain: isMain
+          };
+        });
+      }
+    } else if (req.body.images) {
+      // Parse image data if provided directly
+      try {
+        productData.images = typeof req.body.images === 'string' 
+          ? JSON.parse(req.body.images) 
+          : req.body.images;
+      } catch (e) {
+        logger.error('Failed to parse images data:', e);
+      }
+    }
+
+    // Validate that we have at least one image
+    if (!productData.images || productData.images.length === 0) {
+      return errorResponse(res, 'At least one product image is required', null, 400);
+    }
+
+    // Log the final product data before creation
+    logger.info('Final product data for creation:', productData);
+
+    // Create product
+    const product = await ProductService.createProduct(req.user._id, productData);
+
+    // Create notification for the merchant
+    await NotificationService.createNotification(
+      req.user._id,
+      'product',
+      'Product Created',
+      `Your product "${title}" has been created successfully.`,
+      { productId: product._id }
+    );
+
+    return successResponse(res, 'Product created successfully', { product }, 201);
+  } catch (error) {
+    logger.error('Error creating product:', error);
+
+    // Check for specific error cases
+    if ((error as Error).message.includes('User is not eligible')) {
+      return errorResponse(res, 'Complete email and ID verification before creating products', null, 403);
+    }
+    
+    if ((error as Error).message.includes('slug already in use')) {
+      return errorResponse(res, 'Product slug already in use. Please try a different one.', null, 400);
+    }
+    
+    if ((error as Error).message.includes('Maximum 10 images')) {
+      return errorResponse(res, 'Maximum 10 images allowed per product', null, 400);
+    }
+
+    // Log more details about the error
+    if (error instanceof Error) {
+      logger.error('Error details:', { 
+        message: error.message,
+        stack: error.stack,
+        name: error.name
+      });
+    }
+
+    return errorResponse(res, 'An error occurred while creating product', (error as Error).message, 500);
+  }
+};
+
+// @desc    Get all merchant's products
+// @route   GET /api/products
+// @access  Private (merchants only)
+export const getMerchantProducts = async (req: Request, res: Response): Promise<Response> => {
+  try {
+    const { page, limit, status, type, currency, search, sortBy, sortOrder } = req.query;
+
+    // Get merchant ID from user
+    const merchantId = req.user.merchantId;
+
+    if (!merchantId) {
+      return errorResponse(res, 'Merchant profile not found', null, 404);
+    }
+
+    // Query products
+    const result = await ProductService.getMerchantProducts(merchantId, {
+      page: page ? parseInt(page as string, 10) : undefined,
+      limit: limit ? parseInt(limit as string, 10) : undefined,
+      status: status as any,
+      type: type as any,
+      currency: currency as string,
+      search: search as string,
+      sortBy: sortBy as string,
+      sortOrder: sortOrder as any,
+    });
+
+    return successResponse(res, 'Products retrieved successfully', result);
+  } catch (error) {
+    logger.error('Error retrieving products:', error);
+    return errorResponse(res, 'An error occurred while retrieving products', null, 500);
+  }
+};
+
+// @desc    Get a single product by ID
+// @route   GET /api/products/:id
+// @access  Private (merchants only)
+export const getProductById = async (req: Request, res: Response): Promise<Response> => {
+  try {
+    const { id } = req.params;
+
+    // Get product
+    const product = await ProductService.getProductById(id);
+
+    // Standardize existing image URLs
+    if (product && product.images) {
+      product.images = product.images.map(image => ({
+        ...image,
+        url: standardizeImagePath(image.url)
+      }));
+    }
+
+    if (!product) {
+      return errorResponse(res, 'Product not found', null, 404);
+    }
+
+    // Check ownership
+    if (product.merchantId.toString() !== req.user.merchantId?.toString()) {
+      return errorResponse(res, 'You do not have permission to view this product', null, 403);
+    }
+
+    return successResponse(res, 'Product retrieved successfully', { product });
+  } catch (error) {
+    logger.error('Error retrieving product:', error);
+    return errorResponse(res, 'An error occurred while retrieving product', null, 500);
+  }
+};
+
+// @desc    Update a product
+// @route   PUT /api/products/:id
+// @access  Private (merchants only, verified)
+export const updateProduct = async (req: Request, res: Response): Promise<Response> => {
+  try {
+    // Log the raw request body for debugging
+    logger.info('Product update request body:', JSON.stringify(req.body));
+
+    const { id } = req.params;
+
+    // Get current product to check if it exists and verify ownership
+    const existingProduct = await ProductService.getProductById(id);
+
+    if (!existingProduct) {
+      return errorResponse(res, 'Product not found', null, 404);
+    }
+
+    // Check ownership
+    if (existingProduct.merchantId.toString() !== req.user.merchantId?.toString()) {
+      return errorResponse(res, 'You do not have permission to modify this product', null, 403);
+    }
+
+    // Check if product is deleted
+    if (existingProduct.status === 'deleted') {
+      return errorResponse(res, 'Cannot update a deleted product', null, 400);
+    }
+
+    // Start with existing product data to preserve fields that aren't being updated
+    const updates: any = {};
+
+    // Update basic fields if provided
+    const basicFields = [
+      'title', 'description', 'shortDescription', 'longDescription', 
+      'price', 'currency', 'status', 'type', 'sku', 'barcode'
+    ];
+    
+    basicFields.forEach(field => {
+      if (req.body[field] !== undefined) {
+        updates[field] = req.body[field];
+      }
+    });
+
+    // Handle backwards compatibility - if old description field is updated but new fields aren't
+    if (updates.description && !updates.shortDescription && !updates.longDescription) {
+      updates.shortDescription = updates.description;
+      updates.longDescription = updates.description;
+    }
+
+    // Make sure price is a number if provided
+    if (updates.price) {
+      updates.price = parseFloat(updates.price);
+    }
+
+    // Handle type-specific fields
+    if (existingProduct.type === 'digital' || updates.type === 'digital') {
+      updates.digital = { ...existingProduct.digital };
+
+      // Handle file method (URL or upload)
+      const fileMethod = req.body.fileMethod;
+
+      if (fileMethod === 'url') {
+        const fileUrl = req.body.fileUrl;
+        if (fileUrl) {
+          updates.digital = updates.digital || {};
+          updates.digital.fileUrl = fileUrl;
+          // Clear file upload if switching to URL
+          updates.digital.fileUpload = undefined;
+        }
+      } else if (fileMethod === 'upload' && req.files && (req.files as any).digitalFile) {
+        const digitalFile = (req.files as any).digitalFile[0];
+        updates.digital = updates.digital || {};
+        
+        // Organize digital file by slug
+        const organizedFiles = await organizeFilesBySlug([(req.files as any).digitalFile[0]], existingProduct.slug);
+        if (organizedFiles.length > 0) {
+          updates.digital.fileUpload = organizedFiles[0];
+        } else {
+          updates.digital.fileUpload = digitalFile.filename || digitalFile.path;
+        }
+        
+        // Clear file URL if switching to upload
+        updates.digital.fileUrl = undefined;
+      }
+
+      // If isRecurring is explicitly set to false, remove recurring settings
+      if (req.body.isRecurring === 'false') {
+        if (updates.digital) {
+          updates.digital.recurring = undefined;
+        }
+      }
+      // Handle recurring subscription data
+      else if (req.body.isRecurring === 'true' && req.body.digital) {
+        try {
+          const digitalData = typeof req.body.digital === 'string' 
+            ? JSON.parse(req.body.digital) 
+            : req.body.digital;
+
+          if (digitalData.recurring) {
+            updates.digital = updates.digital || {};
+            updates.digital.recurring = digitalData.recurring;
+          } else {
+            // Remove recurring if not enabled
+            if (updates.digital) {
+              updates.digital.recurring = undefined;
+            }
+          }
+        } catch (e) {
+          logger.error('Failed to parse digital data for update:', e);
+        }
+      }
+    } 
+    else if (existingProduct.type === 'physical' || updates.type === 'physical') {
+      updates.physical = { ...existingProduct.physical };
+
+      // Handle stock without variants
+      if (req.body.hasStock === 'true' && req.body.stock) {
+        updates.physical.stock = parseInt(req.body.stock, 10);
+      } else if (req.body.hasStock === 'false') {
+        updates.physical.stock = undefined;
+      }
+      
+      // Handle shipping methods
+      if (req.body.shippingMethods) {
+        try {
+          const shippingMethods = typeof req.body.shippingMethods === 'string'
+            ? JSON.parse(req.body.shippingMethods)
+            : req.body.shippingMethods;
+            
+          if (Array.isArray(shippingMethods)) {
+            updates.physical.shippingMethods = shippingMethods;
+          }
+        } catch (e) {
+          logger.error('Failed to parse shipping methods for update:', e);
+        }
+      }
+
+      // Parse physical data if provided
+      if (req.body.physical) {
+        try {
+          const physicalData = typeof req.body.physical === 'string' 
+            ? JSON.parse(req.body.physical) 
+            : req.body.physical;
+
+          Object.assign(updates.physical, physicalData);
+        } catch (e) {
+          logger.error('Failed to parse physical data for update:', e);
+        }
+      }
+    }
+
+    // Handle variants
+    if (req.body.hasVariants === 'true' && req.body.variants) {
+      try {
+        updates.variants = typeof req.body.variants === 'string' 
+          ? JSON.parse(req.body.variants) 
+          : req.body.variants;
+      } catch (e) {
+        logger.error('Failed to parse variants data for update:', e);
+      }
+    } else if (req.body.hasVariants === 'false') {
+      // Remove variants if disabled
+      updates.variants = [];
+    }
+
+    // Start with existing images
+    const currentImages = existingProduct.images || [];
+    let updatedImages = [...currentImages];
+
+    // Handle removed images
+    if (req.body.removedImages) {
+      const removedIndices = req.body.removedImages.split(',').map((idx: string) => parseInt(idx, 10));
+      updatedImages = updatedImages.filter((_img, idx) => !removedIndices.includes(idx));
+    }
+
+    // Handle new images - limit to 10 total
+    if (req.files && (req.files as any).newImages) {
+      const newImageFiles = Array.isArray((req.files as any).newImages) 
+        ? (req.files as any).newImages 
+        : [(req.files as any).newImages];
+      
+      // Calculate how many new images we can add
+      const maxNewImages = 10 - updatedImages.length;
+      if (maxNewImages <= 0) {
+        return errorResponse(res, 'Maximum 10 images allowed per product', null, 400);
+      }
+      
+      // Limit to available slots
+      const limitedNewImageFiles = newImageFiles.slice(0, maxNewImages);
+      
+      // Organize new images by slug
+      const organizedPaths = await organizeFilesBySlug(limitedNewImageFiles, existingProduct.slug);
+      
+      if (organizedPaths.length > 0) {
+        // Create image objects for organized files
+        const newImages = organizedPaths.map((path) => ({
+          url: path,
+          isMain: false // New images are not main by default
+        }));
+        
+        // Add new images to the list
+        updatedImages = [...updatedImages, ...newImages];
+      } else {
+        // Fallback if organization fails
+        const newImages = limitedNewImageFiles.map((file: any) => {
+          // Get just the filename part
+          const filename = file.filename || file.originalname;
+          
+          // Create the standardized URL path
+          const imagePath = `/api/uploads/${filename}`;
+          
+          return {
+            url: imagePath,
+            isMain: false // New images are not main by default
+          };
+        });
+        
+        // Add new images to the list
+        updatedImages = [...updatedImages, ...newImages];
+      }
+    }
+
+    // Handle main image selection
+    if (req.body.mainImageIndex !== undefined) {
+      const mainIndex = parseInt(req.body.mainImageIndex, 10);
+      
+      // Check if this is a new image or existing image
+      if (req.body.mainImageIsNew === 'true') {
+        // Calculate the actual index in the updatedImages array
+        const currentCount = currentImages.length;
+        const newIndex = currentCount + parseInt(req.body.mainImageNewIndex, 10);
+        
+        // Set the selected image as main and others as not main
+        updatedImages = updatedImages.map((img, idx) => ({
+          ...img,
+          isMain: idx === newIndex
+        }));
+      } else {
+        // Set the selected image as main and others as not main
+        updatedImages = updatedImages.map((img, idx) => ({
+          ...img,
+          isMain: idx === mainIndex
+        }));
+      }
+    }
+
+    // Only update images if there are changes
+    if (updatedImages.length > 0) {
+      updates.images = updatedImages;
+    }
+
+    // Log the update data
+    logger.info('Update data for product:', updates);
+
+    // Update product
+    const updatedProduct = await ProductService.updateProduct(id, req.user._id, updates);
+
+    if (!updatedProduct) {
+      return errorResponse(res, 'Failed to update product', null, 500);
+    }
+
+    return successResponse(res, 'Product updated successfully', { product: updatedProduct });
+  } catch (error) {
+    logger.error('Error updating product:', error);
+
+    // Check for specific error cases
+    if ((error as Error).message.includes('User is not eligible')) {
+      return errorResponse(res, 'Complete email and ID verification before updating products', null, 403);
+    }
+
+    if ((error as Error).message.includes('permission')) {
+      return errorResponse(res, 'You do not have permission to modify this product', null, 403);
+    }
+    
+    if ((error as Error).message.includes('Maximum 10 images')) {
+      return errorResponse(res, 'Maximum 10 images allowed per product', null, 400);
+    }
+    
+    if ((error as Error).message.includes('Duplicate variant name')) {
+      return errorResponse(res, 'Duplicate variant names are not allowed', null, 400);
+    }
+
+    return errorResponse(res, 'An error occurred while updating product', (error as Error).message, 500);
+  }
+};
+
+// @desc    Delete a product (soft delete)
+// @route   DELETE /api/products/:id
+// @access  Private (merchants only)
+export const deleteProduct = async (req: Request, res: Response): Promise<Response> => {
+  try {
+    const { id } = req.params;
+
+    // Delete product
+    const product = await ProductService.deleteProduct(id, req.user._id);
+
+    if (!product) {
+      return errorResponse(res, 'Product not found', null, 404);
+    }
+
+    return successResponse(res, 'Product deleted successfully', { productId: id });
+  } catch (error) {
+    logger.error('Error deleting product:', error);
+
+    if ((error as Error).message.includes('permission')) {
+      return errorResponse(res, 'You do not have permission to delete this product', null, 403);
+    }
+
+    return errorResponse(res, 'An error occurred while deleting product', null, 500);
+  }
+};
+
+// @desc    Get a public product (for checkout/public view)
+// @route   GET /api/products/public/:id
+// @access  Public
+export const getPublicProduct = async (req: Request, res: Response): Promise<Response> => {
+  try {
+    const { id } = req.params;
+
+    // Get public product details
+    const product = await ProductService.getPublicProductDetails(id);
+
+    // Standardize existing image URLs
+    if (product && product.images) {
+      product.images = product.images.map(image => ({
+        ...image,
+        url: standardizeImagePath(image.url)
+      }));
+    }
+
+    if (!product) {
+      return errorResponse(res, 'Product not found or not active', null, 404);
+    }
+
+    return successResponse(res, 'Product details retrieved', { product });
+  } catch (error) {
+    logger.error('Error retrieving public product:', error);
+    return errorResponse(res, 'An error occurred while retrieving product details', null, 500);
+  }
+};
+
+src/controllers/admin.product.controller.ts
+// src/controllers/admin.product.controller.ts
+// Controller for admin operations on products
+
+import { Request, Response } from 'express';
+import { successResponse, errorResponse } from '../utils/response';
+import ProductService from '../services/product.service';
+import NotificationService from '../services/notification.service';
+import logger from '../utils/logger';
+import UserModel from '../models/user.model';
+import ProductModel from '../models/product.model';
+import { PipelineStage } from 'mongoose';
+
+// @desc    Admin - Get all products with advanced filtering
+// @route   GET /api/admin/products
+// @access  Admin only
+export const adminGetProducts = async (req: Request, res: Response): Promise<Response> => {
+  try {
+    const {
+      page,
+      limit,
+      status,
+      type,
+      currency,
+      search,
+      merchantId,
+      sortBy,
+      sortOrder,
+      fromDate,
+      toDate,
+      priceMin,
+      priceMax,
+    } = req.query;
+    
+    // Query products with admin privileges
+    const result = await ProductService.adminGetProducts({
+      page: page ? parseInt(page as string) : undefined,
+      limit: limit ? parseInt(limit as string) : undefined,
+      status: status as any,
+      type: type as any,
+      currency: currency as string,
+      search: search as string,
+      merchantId: merchantId as string,
+      sortBy: sortBy as string,
+      sortOrder: sortOrder as any,
+      fromDate: fromDate ? new Date(fromDate as string) : undefined,
+      toDate: toDate ? new Date(toDate as string) : undefined,
+      priceMin: priceMin ? parseFloat(priceMin as string) : undefined,
+      priceMax: priceMax ? parseFloat(priceMax as string) : undefined,
+    });
+    
+    return successResponse(res, 'Products retrieved successfully', result);
+  } catch (error) {
+    logger.error('Admin - Error retrieving products:', error);
+    return errorResponse(res, 'An error occurred while retrieving products', null, 500);
+  }
+};
+
+// @desc    Admin - Get a single product by ID
+// @route   GET /api/admin/products/:id
+// @access  Admin only
+export const adminGetProductById = async (req: Request, res: Response): Promise<Response> => {
+  try {
+    const { id } = req.params;
+    
+    // Get product
+    const product = await ProductService.getProductById(id);
+    
+    if (!product) {
+      return errorResponse(res, 'Product not found', null, 404);
+    }
+    
+    // Get merchant details for context
+    const merchant = await UserModel.findOne({ merchantId: product.merchantId })
+      .select('email _id')
+      .populate('merchantId', 'businessName country');
+    
+    return successResponse(res, 'Product retrieved successfully', { 
+      product,
+      merchant: merchant || null 
+    });
+  } catch (error) {
+    logger.error('Admin - Error retrieving product:', error);
+    return errorResponse(res, 'An error occurred while retrieving product', null, 500);
+  }
+};
+
+// @desc    Admin - Update a product
+// @route   PUT /api/admin/products/:id
+// @access  Admin only with full access
+export const adminUpdateProduct = async (req: Request, res: Response): Promise<Response> => {
+  try {
+    const { id } = req.params;
+    const updates = req.body;
+    
+    // Check for full access
+    if (!req.adminUser?.hasFullAccess) {
+      return errorResponse(res, 'This operation requires admin access key', null, 403);
+    }
+    
+    // Update product with admin privileges
+    const product = await ProductService.adminUpdateProduct(
+      id, 
+      updates, 
+      req.adminUser.username
+    );
+    
+    if (!product) {
+      return errorResponse(res, 'Product not found', null, 404);
+    }
+    
+    // If significant updates (e.g. price change, deactivation), notify the merchant
+    if (updates.price !== undefined || updates.status === 'deactivated') {
+      // Find the merchant (user) by merchantId
+      const user = await UserModel.findOne({ merchantId: product.merchantId });
+      
+      if (user) {
+        // Create notification for the merchant
+        const message = updates.status === 'deactivated'
+          ? `Your product "${product.title}" has been deactivated by an administrator.`
+          : `Your product "${product.title}" has been updated by an administrator.`;
+          
+        await NotificationService.createNotification(
+            user._id as string,
+          'product',
+          'Product Updated by Admin',
+          message,
+          { 
+            productId: product._id,
+            updatedBy: req.adminUser.username,
+            changes: Object.keys(updates)
+          }
+        );
+      }
+    }
+    
+    return successResponse(res, 'Product updated successfully', { product });
+  } catch (error) {
+    logger.error('Admin - Error updating product:', error);
+    return errorResponse(res, 'An error occurred while updating product', null, 500);
+  }
+};
+
+// @desc    Admin - Delete a product (hard delete)
+// @route   DELETE /api/admin/products/:id
+// @access  Admin only with full access
+export const adminDeleteProduct = async (req: Request, res: Response): Promise<Response> => {
+  try {
+    const { id } = req.params;
+    
+    // Check for full access
+    if (!req.adminUser?.hasFullAccess) {
+      return errorResponse(res, 'This operation requires admin access key', null, 403);
+    }
+    
+    // Verify product exists
+    const product = await ProductService.getProductById(id);
+    
+    if (!product) {
+      return errorResponse(res, 'Product not found', null, 404);
+    }
+    
+    // Hard delete (completely remove from database)
+    await product.deleteOne();
+    
+    // Find the merchant (user) by merchantId
+    const user = await UserModel.findOne({ merchantId: product.merchantId });
+    
+    if (user) {
+      // Create notification for the merchant
+      await NotificationService.createNotification(
+        user._id as string,
+        'product',
+        'Product Deleted by Admin',
+        `Your product "${product.title}" has been permanently deleted by an administrator.`,
+        { 
+            productId: (product._id as import('mongoose').Types.ObjectId).toString(),
+          deletedBy: req.adminUser.username
+        }
+      );
+    }
+    
+    return successResponse(res, 'Product permanently deleted', { productId: id });
+  } catch (error) {
+    logger.error('Admin - Error deleting product:', error);
+    return errorResponse(res, 'An error occurred while deleting product', null, 500);
+  }
+};
+
+// @desc    Admin - Force change product currency
+// @route   PATCH /api/admin/products/:id/currency
+// @access  Admin only with full access
+export const adminChangeProductCurrency = async (req: Request, res: Response): Promise<Response> => {
+  try {
+    const { id } = req.params;
+    const { currency, newPrice } = req.body;
+    
+    // Check for full access
+    if (!req.adminUser?.hasFullAccess) {
+      return errorResponse(res, 'This operation requires admin access key', null, 403);
+    }
+    
+    // Validate required fields
+    if (!currency) {
+      return errorResponse(res, 'Currency is required', null, 400);
+    }
+    
+    // Verify currency is valid
+    const validCurrencies = ['USD', 'BRL', 'EUR', 'GBP', 'CAD', 'AUD', 'JPY'];
+    if (!validCurrencies.includes(currency.toUpperCase())) {
+      return errorResponse(res, `Invalid currency. Supported currencies: ${validCurrencies.join(', ')}`, null, 400);
+    }
+    
+    // Get product
+    const product = await ProductService.getProductById(id);
+    
+    if (!product) {
+      return errorResponse(res, 'Product not found', null, 404);
+    }
+    
+    // Update currency (and price if provided)
+    const updates: any = { 
+      currency: currency.toUpperCase() 
+    };
+    
+    if (newPrice !== undefined) {
+      updates.price = parseFloat(newPrice);
+    }
+    
+    // Update product
+    const updatedProduct = await ProductService.adminUpdateProduct(
+      id,
+      updates,
+      req.adminUser.username
+    );
+    
+    // Find the merchant (user) by merchantId and notify
+    const user = await UserModel.findOne({ merchantId: product.merchantId });
+    
+    if (user) {
+      await NotificationService.createNotification(
+        user._id as string,
+        'product',
+        'Product Currency Changed',
+        `The currency for your product "${product.title}" has been changed from ${product.currency} to ${currency.toUpperCase()} by an administrator.`,
+        { 
+          productId: product._id,
+          oldCurrency: product.currency,
+          newCurrency: currency.toUpperCase(),
+          oldPrice: product.price,
+          newPrice: updates.price || product.price
+        }
+      );
+    }
+    
+    return successResponse(res, 'Product currency updated successfully', { product: updatedProduct });
+  } catch (error) {
+    logger.error('Admin - Error changing product currency:', error);
+    return errorResponse(res, 'An error occurred while changing product currency', null, 500);
+  }
+};
+
+// @desc    Admin - Get product stats
+// @route   GET /api/admin/products/stats
+// @access  Admin only
+export const adminGetProductStats = async (req: Request, res: Response): Promise<Response> => {
+  try {
+    // Get high-level stats
+    const totalActive = await ProductService.adminGetProducts({ status: 'active' }).then(r => r.total);
+    const totalDeactivated = await ProductService.adminGetProducts({ status: 'deactivated' }).then(r => r.total);
+    const totalDeleted = await ProductService.adminGetProducts({ status: 'deleted' }).then(r => r.total);
+    
+    // Get currency distribution
+    const pipeline: PipelineStage[] = [
+             {
+               $group: {
+                 _id: '$currency',
+                 count: { $sum: 1 },
+                 avgPrice: { $avg: '$price' }
+               }
+             },
+             {
+               // Use a literal 1 or -1 so TS recognizes it as valid Sort order
+               $sort: { count: 1 }
+             }
+           ];
+           const currencyStats = await ProductModel.aggregate(pipeline);
+    
+    // Get type distribution
+    const typePipeline = [
+      {
+        $group: {
+          _id: '$type',
+          count: { $sum: 1 }
+        }
+      }
+    ];
+    
+    const typeStats = await ProductModel.aggregate(typePipeline);
+    
+    return successResponse(res, 'Product statistics retrieved', {
+      counts: {
+        total: totalActive + totalDeactivated + totalDeleted,
+        active: totalActive,
+        deactivated: totalDeactivated,
+        deleted: totalDeleted
+      },
+      currencies: currencyStats,
+      types: typeStats
+    });
+  } catch (error) {
+    logger.error('Admin - Error getting product stats:', error);
+    return errorResponse(res, 'An error occurred while retrieving product statistics', null, 500);
+  }
+};
+
+src/models/product.model.ts
+// src/models/product.model.ts - Updated with new fields
+import mongoose, { Document, Schema, Types } from 'mongoose';
+
+export interface IShippingMethod {
+  name: string;
+  price: number; // 0 means free shipping
+}
+
+export interface IVariant {
+  name: string;
+  values: string[];
+  stock: number;
+}
+
+export interface IImage {
+  url: string;
+  isMain: boolean;
+}
+
+export interface IDigitalOptions {
+  fileUrl?: string;
+  fileUpload?: string;
+  recurring?: {
+    interval: 'monthly' | 'yearly';
+    trialDays?: number;
+    hasTrial: boolean;
+  };
+}
+
+export interface IPhysicalOptions {
+  weight?: number;  // in kg
+  dimensions?: {
+    length: number;
+    width: number;
+    height: number;
+  };
+  shippingClass?: string;
+  stock?: number;
+  shippingMethods?: IShippingMethod[];
+}
+
+export interface IProduct extends Document {
+  merchantId: Types.ObjectId;
+  title: string;
+  shortDescription: string;  // Short description for listings
+  longDescription: string;   // Detailed description with HTML
+  description: string;       // Original description field (kept for backward compatibility)
+  slug: string;              // Unique product identifier for URLs
+  price: number;
+  currency: string;          // Currency code (USD, BRL, EUR, etc.)
+  type: 'digital' | 'physical';
+  sku?: string;              // Stock Keeping Unit
+  barcode?: string;          // Barcode (ISBN, UPC, GTIN, etc.)
+  digital?: IDigitalOptions;
+  physical?: IPhysicalOptions;
+  variants?: IVariant[];
+  images: IImage[];
+  status: 'active' | 'deactivated' | 'deleted';
+  listedAt: Date;
+  delistedAt?: Date;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// Define subdocument schemas separately for better type handling
+const ShippingMethodSchema = new Schema({
+  name: {
+    type: String,
+    required: true,
+    trim: true,
+  },
+  price: {
+    type: Number,
+    required: true,
+    min: 0,
+    default: 0,
+  },
+});
+
+const VariantSchema = new Schema({
+  name: {
+    type: String,
+    required: true,
+    trim: true,
+  },
+  values: [{
+    type: String,
+    required: true,
+    trim: true,
+  }],
+  stock: {
+    type: Number,
+    required: true,
+    min: 0,
+    default: 0,
+  },
+});
+
+const ImageSchema = new Schema({
+  url: {
+    type: String,
+    required: true,
+    // Accept both full URLs and server paths
+    validate: {
+      validator: function(v: string) {
+        // Accept both full URLs, absolute paths, and relative paths
+        return /^(https?:\/\/|\/).*/.test(v);
+      },
+      message: (props: { value: string }) => `${props.value} is not a valid URL or path!`
+    },
+  },
+  isMain: {
+    type: Boolean,
+    default: false
+  }
+});
+
+const DigitalOptionsSchema = new Schema({
+  fileUrl: {
+    type: String,
+  },
+  fileUpload: {
+    type: String,
+  },
+  recurring: {
+    interval: {
+      type: String,
+      enum: ['monthly', 'yearly'],
+    },
+    hasTrial: {
+      type: Boolean,
+      default: false
+    },
+    trialDays: {
+      type: Number,
+      min: 0,
+      max: 90,
+    },
+  },
+});
+
+const PhysicalOptionsSchema = new Schema({
+  weight: {
+    type: Number,
+    min: 0,
+  },
+  dimensions: {
+    length: { type: Number, min: 0 },
+    width: { type: Number, min: 0 },
+    height: { type: Number, min: 0 },
+  },
+  shippingClass: {
+    type: String,
+    trim: true,
+  },
+  stock: {
+    type: Number,
+    min: 0,
+    default: 0
+  },
+  shippingMethods: [ShippingMethodSchema],
+});
+
+const ProductSchema = new Schema<IProduct>(
+  {
+    merchantId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Merchant',
+      required: true,
+      index: true,
+    },
+    title: {
+      type: String,
+      required: true,
+      trim: true,
+      minlength: 3,
+      maxlength: 120,
+    },
+    shortDescription: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 200,
+    },
+    longDescription: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 10000,
+    },
+    description: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 4000,
+    },
+    slug: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 50,
+      index: true,
+    },
+    price: {
+      type: Number,
+      required: true,
+      min: 0.01,
+    },
+    currency: {
+      type: String,
+      required: true,
+      uppercase: true,
+      trim: true,
+      // Common currencies (can be expanded later)
+      enum: ['USD', 'BRL', 'EUR', 'GBP', 'CAD', 'AUD', 'JPY'],
+    },
+    type: {
+      type: String,
+      required: true,
+      enum: ['digital', 'physical'],
+    },
+    // New inventory fields
+    sku: {
+      type: String,
+      trim: true,
+      sparse: true,
+      maxlength: 100,
+    },
+    barcode: {
+      type: String,
+      trim: true,
+      sparse: true,
+      maxlength: 100,
+    },
+    digital: DigitalOptionsSchema,
+    physical: PhysicalOptionsSchema,
+    variants: [VariantSchema],
+    images: [ImageSchema],
+    status: {
+      type: String,
+      enum: ['active', 'deactivated', 'deleted'],
+      default: 'active',
+    },
+    listedAt: {
+      type: Date,
+      default: Date.now,
+    },
+    delistedAt: {
+      type: Date,
+      default: null,
+    },
+  },
+  {
+    timestamps: true,
+  }
+);
+
+// Pre-save hook to ensure one main image
+ProductSchema.pre('save', function(next) {
+  // If there are no images, skip this validation
+  if (!this.images || this.images.length === 0) {
+    return next();
+  }
+  
+  // Check if there's already a main image
+  const mainImageExists = this.images.some(image => image.isMain);
+  
+  // If no main image exists, set the first image as main
+  if (!mainImageExists && this.images.length > 0) {
+    this.images[0].isMain = true;
+  }
+  
+  // Ensure only one image is set as main
+  let mainImageCount = 0;
+  
+  this.images.forEach(image => {
+    if (image.isMain) {
+      mainImageCount++;
+    }
+  });
+  
+  // If multiple main images, keep only the first one as main
+  if (mainImageCount > 1) {
+    let foundMain = false;
+    
+    this.images = this.images.map(image => {
+      if (image.isMain) {
+        if (!foundMain) {
+          foundMain = true;
+        } else {
+          image.isMain = false;
+        }
+      }
+      return image;
+    });
+  }
+  
+  // Ensure descriptions are in sync if they're missing
+  // For backwards compatibility
+  if (!this.shortDescription && this.description) {
+    this.shortDescription = this.description;
+  }
+  
+  if (!this.longDescription && this.description) {
+    this.longDescription = this.description;
+  }
+  
+  if (!this.description && (this.shortDescription || this.longDescription)) {
+    this.description = this.shortDescription || this.longDescription;
+  }
+  
+  // Validate variants have unique names
+  if (this.variants && this.variants.length > 0) {
+    const variantNames = new Set();
+    for (const variant of this.variants) {
+      if (variantNames.has(variant.name.toLowerCase())) {
+        const error = new Error(`Duplicate variant name: ${variant.name}`);
+        return next(error);
+      }
+      variantNames.add(variant.name.toLowerCase());
+    }
+  }
+
+  // Validate maximum 10 images
+  if (this.images && this.images.length > 10) {
+    const error = new Error('Maximum 10 images allowed per product');
+    return next(error);
+  }
+  
+  next();
+});
+
+// Create useful indexes
+ProductSchema.index({ merchantId: 1, status: 1 });
+ProductSchema.index({ title: 'text', shortDescription: 'text', longDescription: 'text', description: 'text' });
+ProductSchema.index({ currency: 1 });
+ProductSchema.index({ type: 1 });
+ProductSchema.index({ listedAt: -1 });
+ProductSchema.index({ price: 1 });
+ProductSchema.index({ slug: 1 }, { unique: true });
+ProductSchema.index({ sku: 1 });
+
+export default mongoose.model<IProduct>('Product', ProductSchema);
+
+src/modules/commerce/index.ts
+// src/modules/commerce/index.ts
+// Main entry point for commerce module, combining all routes
+
+import { Router } from 'express';
+import productRoutes from '../../routes/product.routes';
+import financeRoutes from '../../routes/finance.routes';
+import notificationRoutes from '../../routes/notification.routes';
+
+const router = Router();
+
+// Product routes
+router.use('/products', productRoutes);
+
+// Finance routes
+router.use('/finance', financeRoutes);
+
+// Notification routes
+router.use('/notifications', notificationRoutes);
+
+export default router;
+
+src/routes/product.routes.ts
+// src/routes/product.routes.ts
+import { Router } from 'express';
+import {
+  createProduct,
+  getMerchantProducts,
+  getProductById,
+  updateProduct,
+  deleteProduct,
+  getPublicProduct,
+} from '../controllers/product.controller';
+import { authenticate, requireMerchantRole } from '../middlewares/auth.middleware';
+import upload from '../utils/upload'; // Import the centralized upload config
+
+const router = Router();
+
+// Public route: get a single active product for public view
+router.get('/public/:id', getPublicProduct as any);
+
+// All following routes require authentication + merchant role
+router.use(authenticate as any);
+router.use(requireMerchantRole as any);
+
+// Create a new product, accepting up to 10 images + 1 digital file
+router.post(
+  '/',
+  upload.fields([
+    { name: 'images', maxCount: 10 },
+    { name: 'digitalFile', maxCount: 1 },
+  ]),
+  createProduct as any
+);
+
+// List merchant's products
+router.get('/', getMerchantProducts as any);
+
+// Get individual product by ID
+router.get('/:id', getProductById as any);
+
+// Update a product—also allow new file uploads
+router.put(
+  '/:id',
+  upload.fields([
+    { name: 'newImages', maxCount: 10 },
+    { name: 'digitalFile', maxCount: 1 },
+  ]),
+  updateProduct as any
+);
+
+// Soft-delete a product
+router.delete('/:id', deleteProduct as any);
+
+export default router;
+
+src/routes/finance.routes.ts
+// src/routes/finance.routes.ts
+// Routes for financial operations (balance, transactions, payouts)
+
+import { Router } from 'express';
+import {
+  getBalance,
+  getTransactions,
+  requestPayout,
+  getExchangeRates,
+} from '../controllers/balance.controller';
+import { authenticate, requireMerchantRole, requireOnboardingComplete, requireIdVerification } from '../middlewares/auth.middleware';
+
+const router = Router();
+
+// All routes are protected
+router.use(authenticate as any);
+router.use(requireMerchantRole as any);
+router.use(requireOnboardingComplete as any);
+
+// Balance and transactions can be accessed with just completed onboarding
+router.get('/balance', getBalance as any);
+router.get('/transactions', getTransactions as any);
+router.get('/rates', getExchangeRates as any);
+
+// Payout requests require ID verification
+router.post('/payout', requireIdVerification as any, requestPayout as any);
+
+export default router;
+
+src/services/product.service.ts
+// src/services/product.service.ts
+import { Types } from 'mongoose';
+import ProductModel, { IProduct } from '../models/product.model';
+import UserModel from '../models/user.model';
+import MerchantModel from '../models/merchant.model';
+import SettingModel from '../models/settings.model';
+import logger from '../utils/logger';
+
+export class ProductService {
+  /**
+   * Check if a user is allowed to create or modify products
+   * @param userId User ID to check
+   * @returns Boolean indicating if user can create/modify products
+   */
+  public static async canCreateProducts(userId: string | Types.ObjectId): Promise<boolean> {
+    try {
+      // Find user with both status checks
+      const user = await UserModel.findById(userId);
+      
+      if (!user) {
+        return false;
+      }
+      
+      // Both email verification and ID verification are required
+      if (!user.emailVerifiedAt || user.idCheckStatus !== 'verified') {
+        return false;
+      }
+      
+      return true;
+    } catch (error) {
+      logger.error(`Error checking product creation permissions: ${(error as Error).message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Find a product by slug
+   * @param slug Product slug to find
+   * @returns Product or null if not found
+   */
+  public static async findProductBySlug(slug: string): Promise<IProduct | null> {
+    try {
+      return await ProductModel.findOne({ slug });
+    } catch (error) {
+      logger.error(`Error finding product by slug: ${(error as Error).message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Create a new product
+   * @param userId User ID of the creator
+   * @param productData Product data
+   * @returns Created product
+   */
+  public static async createProduct(userId: string | Types.ObjectId, productData: Partial<IProduct>): Promise<IProduct> {
+    try {
+      // Check if user can create products
+      const canCreate = await this.canCreateProducts(userId);
+      if (!canCreate) {
+        throw new Error('User is not eligible to create products. Both email and ID verification are required.');
+      }
+      
+      // Find user's merchant ID
+      const user = await UserModel.findById(userId);
+      if (!user || !user.merchantId) {
+        throw new Error('User does not have a merchant profile');
+      }
+      
+      // Check if slug is already in use
+      if (productData.slug) {
+        const existingProduct = await this.findProductBySlug(productData.slug);
+        if (existingProduct) {
+          throw new Error('Product slug already in use');
+        }
+      }
+      
+      // Validate allowed currencies
+      const allowedCurrencies = await (SettingModel as any).getByKey('allowedCurrencies') || 
+        ['USD', 'BRL', 'EUR', 'GBP', 'CAD', 'AUD', 'JPY'];
+      
+      if (!allowedCurrencies.includes(productData.currency?.toUpperCase() || '')) {
+        throw new Error(`Currency not supported. Allowed currencies: ${allowedCurrencies.join(', ')}`);
+      }
+      
+      // Create new product
+      const newProduct = await ProductModel.create({
+        ...productData,
+        merchantId: user.merchantId,
+        status: 'active',
+        listedAt: new Date(),
+      });
+      
+      logger.info(`Created product ${newProduct._id} for merchant ${user.merchantId}`);
+      
+      return newProduct;
+    } catch (error) {
+      logger.error(`Error creating product: ${(error as Error).message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Get products for a merchant (with pagination)
+   * @param merchantId Merchant ID
+   * @param options Query options (pagination, filters)
+   * @returns Products and pagination metadata
+   */
+  public static async getMerchantProducts(
+    merchantId: string | Types.ObjectId,
+    options: {
+      page?: number;
+      limit?: number;
+      status?: 'active' | 'deactivated' | 'deleted';
+      type?: 'digital' | 'physical';
+      currency?: string;
+      search?: string;
+      sortBy?: string;
+      sortOrder?: 'asc' | 'desc';
+    } = {}
+  ): Promise<{ products: IProduct[]; total: number; page: number; pages: number }> {
+    try {
+      // Default options
+      const page = options.page || 1;
+      const limit = options.limit || 10;
+      const skip = (page - 1) * limit;
+      
+      // Build query
+      const query: any = { merchantId };
+      
+      // Add filters if provided
+      if (options.status) {
+        query.status = options.status;
+      } else {
+        // Default to not showing deleted products
+        query.status = { $ne: 'deleted' };
+      }
+      
+      if (options.type) {
+        query.type = options.type;
+      }
+      
+      if (options.currency) {
+        query.currency = options.currency.toUpperCase();
+      }
+      
+      if (options.search) {
+        query.$or = [
+          { title: { $regex: options.search, $options: 'i' } },
+          { description: { $regex: options.search, $options: 'i' } },
+          { shortDescription: { $regex: options.search, $options: 'i' } },
+          { longDescription: { $regex: options.search, $options: 'i' } },
+          { sku: { $regex: options.search, $options: 'i' } },
+          { barcode: { $regex: options.search, $options: 'i' } },
+        ];
+      }
+      
+      // Build sort
+      const sort: any = {};
+      const sortBy = options.sortBy || 'createdAt';
+      const sortOrder = options.sortOrder === 'asc' ? 1 : -1;
+      sort[sortBy] = sortOrder;
+      
+      // Execute query with pagination
+      const products = await ProductModel.find(query)
+        .sort(sort)
+        .skip(skip)
+        .limit(limit);
+      
+      // Get total count for pagination
+      const total = await ProductModel.countDocuments(query);
+      
+      // Calculate total pages
+      const pages = Math.ceil(total / limit);
+      
+      return {
+        products,
+        total,
+        page,
+        pages,
+      };
+    } catch (error) {
+      logger.error(`Error getting merchant products: ${(error as Error).message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Get a single product by ID
+   * @param productId Product ID
+   * @returns Product or null if not found
+   */
+  public static async getProductById(productId: string | Types.ObjectId): Promise<IProduct | null> {
+    try {
+      return await ProductModel.findById(productId);
+    } catch (error) {
+      logger.error(`Error getting product by ID: ${(error as Error).message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Update a product
+   * @param productId Product ID
+   * @param userId User ID attempting the update
+   * @param updates Updates to apply
+   * @returns Updated product
+   */
+  public static async updateProduct(
+    productId: string | Types.ObjectId,
+    userId: string | Types.ObjectId,
+    updates: Partial<IProduct>
+  ): Promise<IProduct | null> {
+    try {
+      // Check if user can modify products
+      const canCreate = await this.canCreateProducts(userId);
+      if (!canCreate) {
+        throw new Error('User is not eligible to modify products. Both email and ID verification are required.');
+      }
+      
+      // Find user's merchant ID
+      const user = await UserModel.findById(userId);
+      if (!user || !user.merchantId) {
+        throw new Error('User does not have a merchant profile');
+      }
+      
+      // Find product and verify ownership
+      const product = await ProductModel.findById(productId);
+      if (!product) {
+        throw new Error('Product not found');
+      }
+      
+      if (product.merchantId.toString() !== user.merchantId.toString()) {
+        throw new Error('You do not have permission to modify this product');
+      }
+      
+      // Check if product is deleted
+      if (product.status === 'deleted') {
+        throw new Error('Cannot update a deleted product');
+      }
+      
+      // Check if slug is being updated and is already in use by another product
+      if (updates.slug && updates.slug !== product.slug) {
+        const existingProduct = await this.findProductBySlug(updates.slug);
+        if (existingProduct && existingProduct.id !== productId.toString()) {
+          throw new Error('Product slug already in use');
+        }
+      }
+      
+      
+      // Apply updates (allow all relevant fields to be updated)
+      const allowedUpdates = [
+        'title',
+        'description',
+        'shortDescription',
+        'longDescription',
+        'price',
+        'currency',
+        'type',
+        'images',
+        'variants',
+        'status',
+        'physical',
+        'digital',
+        'slug',
+        'sku',
+        'barcode'
+      ];
+      
+      // Create a filtered update object
+      const filteredUpdates: any = {};
+      for (const key of allowedUpdates) {
+        if (key in updates) {
+          filteredUpdates[key] = (updates as any)[key];
+        }
+      }
+      
+      // Special treatment for status changes
+      if (updates.status === 'deactivated') {
+        filteredUpdates.delistedAt = new Date();
+      } else if (updates.status === 'active' && product.status === 'deactivated') {
+        filteredUpdates.delistedAt = null;
+        filteredUpdates.listedAt = new Date();
+      }
+      
+      // Update product
+      const updatedProduct = await ProductModel.findByIdAndUpdate(
+        productId,
+        filteredUpdates,
+        { new: true, runValidators: true }
+      );
+      
+      logger.info(`Updated product ${productId} for merchant ${user.merchantId}`);
+      
+      return updatedProduct;
+    } catch (error) {
+      logger.error(`Error updating product: ${(error as Error).message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Delete a product (soft delete)
+   * @param productId Product ID
+   * @param userId User ID attempting the deletion
+   * @returns Deleted product
+   */
+  public static async deleteProduct(
+    productId: string | Types.ObjectId,
+    userId: string | Types.ObjectId
+  ): Promise<IProduct | null> {
+    try {
+      // Find user's merchant ID
+      const user = await UserModel.findById(userId);
+      if (!user || !user.merchantId) {
+        throw new Error('User does not have a merchant profile');
+      }
+      
+      // Find product and verify ownership
+      const product = await ProductModel.findById(productId);
+      if (!product) {
+        throw new Error('Product not found');
+      }
+      
+      if (product.merchantId.toString() !== user.merchantId.toString()) {
+        throw new Error('You do not have permission to delete this product');
+      }
+      
+      // Soft delete by updating status
+      const deletedProduct = await ProductModel.findByIdAndUpdate(
+        productId,
+        {
+          status: 'deleted',
+          delistedAt: new Date(),
+        },
+        { new: true }
+      );
+      
+      logger.info(`Deleted product ${productId} for merchant ${user.merchantId}`);
+      
+      return deletedProduct;
+    } catch (error) {
+      logger.error(`Error deleting product: ${(error as Error).message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Admin function to get all products with advanced filtering
+   * @param options Query options
+   * @returns Products and pagination metadata
+   */
+  public static async adminGetProducts(
+    options: {
+      page?: number;
+      limit?: number;
+      status?: 'active' | 'deactivated' | 'deleted';
+      type?: 'digital' | 'physical';
+      currency?: string;
+      search?: string;
+      merchantId?: string;
+      sortBy?: string;
+      sortOrder?: 'asc' | 'desc';
+      fromDate?: Date;
+      toDate?: Date;
+      priceMin?: number;
+      priceMax?: number;
+    } = {}
+  ): Promise<{ products: IProduct[]; total: number; page: number; pages: number }> {
+    try {
+      // Default options
+      const page = options.page || 1;
+      const limit = options.limit || 20;
+      const skip = (page - 1) * limit;
+      
+      // Build query
+      const query: any = {};
+      
+      // Add filters if provided
+      if (options.status) {
+        query.status = options.status;
+      }
+      
+      if (options.type) {
+        query.type = options.type;
+      }
+      
+      if (options.currency) {
+        query.currency = options.currency.toUpperCase();
+      }
+      
+      if (options.merchantId) {
+        query.merchantId = options.merchantId;
+      }
+      
+      if (options.search) {
+        query.$or = [
+          { title: { $regex: options.search, $options: 'i' } },
+          { description: { $regex: options.search, $options: 'i' } },
+          { shortDescription: { $regex: options.search, $options: 'i' } },
+          { longDescription: { $regex: options.search, $options: 'i' } },
+          { sku: { $regex: options.search, $options: 'i' } },
+          { barcode: { $regex: options.search, $options: 'i' } },
+          { slug: { $regex: options.search, $options: 'i' } },
+        ];
+      }
+      
+      // Date range filter
+      if (options.fromDate || options.toDate) {
+        query.createdAt = {};
+        
+        if (options.fromDate) {
+          query.createdAt.$gte = options.fromDate;
+        }
+        
+        if (options.toDate) {
+          query.createdAt.$lte = options.toDate;
+        }
+      }
+      
+      // Price range filter
+      if (options.priceMin !== undefined || options.priceMax !== undefined) {
+        query.price = {};
+        
+        if (options.priceMin !== undefined) {
+          query.price.$gte = options.priceMin;
+        }
+        
+        if (options.priceMax !== undefined) {
+          query.price.$lte = options.priceMax;
+        }
+      }
+      
+      // Build sort
+      const sort: any = {};
+      const sortBy = options.sortBy || 'createdAt';
+      const sortOrder = options.sortOrder === 'asc' ? 1 : -1;
+      sort[sortBy] = sortOrder;
+      
+      // Execute query with pagination
+      const products = await ProductModel.find(query)
+        .sort(sort)
+        .skip(skip)
+        .limit(limit);
+      
+      // Get total count for pagination
+      const total = await ProductModel.countDocuments(query);
+      
+      // Calculate total pages
+      const pages = Math.ceil(total / limit);
+      
+      return {
+        products,
+        total,
+        page,
+        pages,
+      };
+    } catch (error) {
+      logger.error(`Error in admin product query: ${(error as Error).message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Admin function to update a product (no ownership check)
+   * @param productId Product ID
+   * @param updates Updates to apply
+   * @param adminId Admin user ID for audit
+   * @returns Updated product
+   */
+  public static async adminUpdateProduct(
+    productId: string | Types.ObjectId,
+    updates: Partial<IProduct>,
+    adminId: string
+  ): Promise<IProduct | null> {
+    try {
+      // Find product
+      const product = await ProductModel.findById(productId);
+      if (!product) {
+        throw new Error('Product not found');
+      }
+      
+      // Apply updates directly (admins can update all fields)
+      const updatedProduct = await ProductModel.findByIdAndUpdate(
+        productId,
+        updates,
+        { new: true, runValidators: true }
+      );
+      
+      // Log admin action for audit trail
+      logger.info(`Admin ${adminId} updated product ${productId} (merchant: ${product.merchantId})`);
+      
+      return updatedProduct;
+    } catch (error) {
+      logger.error(`Error in admin product update: ${(error as Error).message}`);
+      throw error;
+    }
+  }
+  
+  /**
+   * Get public product details (for checkout/public view)
+   * @param productId Product ID
+   * @returns Public product information
+   */
+  public static async getPublicProductDetails(
+    productId: string | Types.ObjectId
+  ): Promise<Partial<IProduct> | null> {
+    try {
+      // Find active product
+      const product = await ProductModel.findOne({
+        _id: productId,
+        status: 'active'
+      });
+      
+      if (!product) {
+        return null;
+      }
+      
+      // Return only public fields
+      return {
+        _id: product._id,
+        title: product.title,
+        description: product.description,
+        shortDescription: product.shortDescription,
+        longDescription: product.longDescription,
+        price: product.price,
+        currency: product.currency,
+        type: product.type,
+        variants: product.variants,
+        images: product.images,
+        // Don't include merchantId or other sensitive fields
+      };
+    } catch (error) {
+      logger.error(`Error getting public product details: ${(error as Error).message}`);
+      throw error;
+    }
+  }
+}
+
+export default ProductService;
+
+src/services/notification.service.ts
+// src/services/notification.service.ts
+// Service for handling user notifications and system-wide announcements
+
+import { Types } from 'mongoose';
+import NotificationModel, { INotification, NotificationType } from '../models/notification.model';
+import UserModel from '../models/user.model';
+import logger from '../utils/logger';
+
+export class NotificationService {
+  /**
+   * Create a notification for a specific user
+   * @param userId User ID
+   * @param type Notification type
+   * @param title Notification title
+   * @param body Notification body
+   * @param metadata Additional metadata
+   * @returns Created notification
+   */
+  public static async createNotification(
+    userId: string | Types.ObjectId,
+    type: NotificationType,
+    title: string,
+    body: string,
+    metadata: Record<string, any> = {}
+  ): Promise<INotification> {
+    try {
+      // Create notification
+      const notification = await NotificationModel.create({
+        userId,
+        type,
+        title,
+        body,
+        unread: true,
+        metadata,
+      });
+      
+      logger.info(`Created notification for user ${userId}: ${type} - ${title}`);
+      
+      return notification;
+    } catch (error) {
+      logger.error(`Error creating notification: ${(error as Error).message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Get notifications for a user
+   * @param userId User ID
+   * @param options Query options
+   * @returns Notifications and pagination metadata
+   */
+  public static async getUserNotifications(
+    userId: string | Types.ObjectId,
+    options: {
+      page?: number;
+      limit?: number;
+      unreadOnly?: boolean;
+      type?: NotificationType;
+    } = {}
+  ): Promise<{ notifications: INotification[]; total: number; unreadCount: number }> {
+    try {
+      // Default options
+      const page = options.page || 1;
+      const limit = options.limit || 20;
+      const skip = (page - 1) * limit;
+      
+      // Build query
+      const query: any = { userId };
+      
+      if (options.unreadOnly) {
+        query.unread = true;
+      }
+      
+      if (options.type) {
+        query.type = options.type;
+      }
+      
+      // Get notifications with pagination
+      const notifications = await NotificationModel.find(query)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit);
+      
+      // Get total count
+      const total = await NotificationModel.countDocuments(query);
+      
+      // Get unread count
+      const unreadCount = await NotificationModel.countDocuments({ 
+        userId, 
+        unread: true 
+      });
+      
+      return {
+        notifications,
+        total,
+        unreadCount,
+      };
+    } catch (error) {
+      logger.error(`Error getting user notifications: ${(error as Error).message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Mark notifications as read
+   * @param userId User ID
+   * @param notificationIds Array of notification IDs to mark as read
+   * @returns Number of notifications marked as read
+   */
+  public static async markAsRead(
+    userId: string | Types.ObjectId,
+    notificationIds: (string | Types.ObjectId)[]
+  ): Promise<number> {
+    try {
+      if (!notificationIds.length) {
+        return 0;
+      }
+      
+      // Update notifications
+      const result = await NotificationModel.updateMany(
+        {
+          _id: { $in: notificationIds },
+          userId,
+          unread: true,
+        },
+        {
+          unread: false,
+          readAt: new Date(),
+        }
+      );
+      
+      logger.info(`Marked ${result.modifiedCount} notifications as read for user ${userId}`);
+      
+      return result.modifiedCount;
+    } catch (error) {
+      logger.error(`Error marking notifications as read: ${(error as Error).message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Mark all notifications as read for a user
+   * @param userId User ID
+   * @returns Number of notifications marked as read
+   */
+  public static async markAllAsRead(userId: string | Types.ObjectId): Promise<number> {
+    try {
+      // Update all unread notifications
+      const result = await NotificationModel.updateMany(
+        {
+          userId,
+          unread: true,
+        },
+        {
+          unread: false,
+          readAt: new Date(),
+        }
+      );
+      
+      logger.info(`Marked all ${result.modifiedCount} notifications as read for user ${userId}`);
+      
+      return result.modifiedCount;
+    } catch (error) {
+      logger.error(`Error marking all notifications as read: ${(error as Error).message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Delete a notification
+   * @param userId User ID
+   * @param notificationId Notification ID
+   * @returns Boolean indicating success
+   */
+  public static async deleteNotification(
+    userId: string | Types.ObjectId,
+    notificationId: string | Types.ObjectId
+  ): Promise<boolean> {
+    try {
+      // Delete notification (only if it belongs to the user)
+      const result = await NotificationModel.deleteOne({
+        _id: notificationId,
+        userId,
+      });
+      
+      if (result.deletedCount === 0) {
+        throw new Error('Notification not found or does not belong to the user');
+      }
+      
+      logger.info(`Deleted notification ${notificationId} for user ${userId}`);
+      
+      return true;
+    } catch (error) {
+      logger.error(`Error deleting notification: ${(error as Error).message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Admin function to broadcast a notification to multiple users
+   * @param type Notification type
+   * @param title Notification title
+   * @param body Notification body
+   * @param options Target options
+   * @param adminId Admin user ID for audit
+   * @returns Number of notifications created
+   */
+  public static async adminBroadcastNotification(
+    type: NotificationType,
+    title: string,
+    body: string,
+    options: {
+      role?: 'merchant' | 'admin';
+      country?: 'US' | 'BR';
+      userIds?: (string | Types.ObjectId)[];
+    },
+    adminId: string
+  ): Promise<number> {
+    try {
+      // Build query to find target users
+      const query: any = {};
+      
+      if (options.role) {
+        query.role = options.role;
+      }
+      
+      if (options.userIds && options.userIds.length > 0) {
+        query._id = { $in: options.userIds };
+      }
+      
+      // If country filter, we need to join with merchant data
+      let users = [];
+      if (options.country) {
+        users = await UserModel.aggregate([
+          {
+            $lookup: {
+              from: 'merchants',
+              localField: 'merchantId',
+              foreignField: '_id',
+              as: 'merchant',
+            },
+          },
+          {
+            $match: {
+              ...query,
+              'merchant.country': options.country,
+            },
+          },
+          {
+            $project: {
+              _id: 1,
+            },
+          },
+        ]);
+      } else {
+        users = await UserModel.find(query).select('_id');
+      }
+      
+      if (users.length === 0) {
+        return 0;
+      }
+      
+      // Create notifications in bulk
+      const notifications = users.map(user => ({
+        userId: user._id,
+        type,
+        title,
+        body,
+        unread: true,
+        metadata: {
+          isSystemBroadcast: true,
+          broadcastBy: adminId,
+        },
+      }));
+      
+      // Insert notifications
+      const result = await NotificationModel.insertMany(notifications);
+      
+      logger.info(`Admin ${adminId} broadcasted notification to ${result.length} users: ${type} - ${title}`);
+      
+      return result.length;
+    } catch (error) {
+      logger.error(`Error in admin broadcast: ${(error as Error).message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Admin function to delete notifications for a user
+   * @param userId User ID
+   * @param adminId Admin user ID for audit
+   * @returns Number of notifications deleted
+   */
+  public static async adminDeleteUserNotifications(
+    userId: string | Types.ObjectId,
+    adminId: string
+  ): Promise<number> {
+    try {
+      // Delete all notifications for the user
+      const result = await NotificationModel.deleteMany({ userId });
+      
+      logger.info(`Admin ${adminId} deleted ${result.deletedCount} notifications for user ${userId}`);
+      
+      return result.deletedCount;
+    } catch (error) {
+      logger.error(`Error in admin notification deletion: ${(error as Error).message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Cleanup expired or old read notifications
+   * @param daysToKeepRead Days to keep read notifications
+   * @returns Number of notifications deleted
+   */
+  public static async cleanupOldNotifications(daysToKeepRead: number = 90): Promise<number> {
+    try {
+      // Calculate cutoff date
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - daysToKeepRead);
+      
+      // Delete old read notifications
+      const result = await NotificationModel.deleteMany({
+        unread: false,
+        readAt: { $lt: cutoffDate },
+      });
+      
+      logger.info(`Cleaned up ${result.deletedCount} old read notifications (older than ${daysToKeepRead} days)`);
+      
+      return result.deletedCount;
+    } catch (error) {
+      logger.error(`Error cleaning up old notifications: ${(error as Error).message}`);
+      throw error;
+    }
+  }
+}
+
+export default NotificationService;
+
+src/services/cron.service.ts
+// src/services/cron.service.ts
+// Service for handling scheduled jobs (reserve release, notification cleanup)
+
+const cron = require('node-cron');
+import BalanceService from './balance.service';
+import NotificationService from './notification.service';
+import MerchantModel from '../models/merchant.model';
+import BalanceModel from '../models/balance.model';
+import logger from '../utils/logger';
+
+export class CronService {
+  /**
+   * Initialize all cron jobs:
+   * - Release funds from reserve daily
+   * - Cleanup notifications weekly
+   */
+  public static initializeJobs(): void {
+    logger.info('Initializing cron jobs...');
+
+    // Release funds from reserve at 02:00 UTC every day
+    cron.schedule('0 2 * * *', () => {
+      this.releaseFundsFromReserve();
+    });
+
+    // Cleanup old notifications at 03:00 UTC every Sunday
+    cron.schedule('0 3 * * 0', () => {
+      this.cleanupNotifications();
+    });
+
+    logger.info('Cron jobs initialized successfully');
+  }
+
+  /**
+   * Release placeholder funds from reserve to available for each active merchant.
+   */
+  private static async releaseFundsFromReserve(): Promise<void> {
+    try {
+      logger.info('Running release funds from reserve job');
+
+      const merchants = await MerchantModel.find({ status: 'active' });
+      let totalProcessed = 0;
+      let totalReleased = 0;
+
+      for (const merchant of merchants) {
+        try {
+          // Placeholder logic: release up to 100 units per merchant
+          const balance = await BalanceModel.findOne({ merchantId: merchant._id });
+          if (balance && balance.reserve > 0) {
+            const released = Math.min(balance.reserve, 100);
+            await BalanceService.moveFromReserveToAvailable(
+              merchant._id as string,
+              released,
+              'scheduled-release'
+            );
+            totalReleased += released;
+          }
+          totalProcessed++;
+        } catch (err) {
+          logger.error(
+            `Error processing merchant ${merchant._id} for reserve release:`,
+            err
+          );
+        }
+      }
+
+      logger.info(
+        `Release funds job completed: processed ${totalProcessed} merchants, released ${totalReleased} total`
+      );
+    } catch (err) {
+      logger.error('Error in release funds from reserve job:', err);
+    }
+  }
+
+  /**
+   * Delete read notifications older than retention period.
+   */
+  private static async cleanupNotifications(): Promise<void> {
+    try {
+      logger.info('Running notifications cleanup job');
+
+      const retentionDays = 90;
+      const deletedCount = await NotificationService.cleanupOldNotifications(retentionDays);
+
+      logger.info(`Notifications cleanup completed: deleted ${deletedCount} old notifications`);
+    } catch (err) {
+      logger.error('Error in notifications cleanup job:', err);
+    }
+  }
+}
+
+export default CronService;
+
+
+src/services/init.service.ts
+// src/services/init.service.ts
+// Service for initializing application settings and defaults (FX initialization is now manual)
+
+import SettingModel from '../models/settings.model';
+import CronService from './cron.service';
+import logger from '../utils/logger';
+
+export class InitService {
+  /**
+   * Initialize the application
+   * - Set up default settings
+   * - Start cron jobs (FX jobs removed; rates are managed manually via admin endpoint)
+   */
+  public static async initialize(): Promise<void> {
+    try {
+      logger.info('Initializing application...');
+
+      // Initialize default settings
+      await this.initializeSettings();
+
+      // Skip automatic FX initialization
+      logger.info(
+        'Skipping automatic FX rates initialization; rates will be managed manually via admin endpoint'
+      );
+
+      // Start cron jobs
+      CronService.initializeJobs();
+
+      logger.info('Application initialized successfully');
+    } catch (error) {
+      logger.error('Error initializing application:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Initialize default settings
+   */
+  private static async initializeSettings(): Promise<void> {
+    try {
+      logger.info('Initializing default settings...');
+
+      // Ensure settings collection exists and has defaults
+      await (SettingModel as any).initDefaults();
+
+      logger.info('Default settings initialized successfully');
+    } catch (error) {
+      logger.error('Error initializing default settings:', error);
+      throw error;
+    }
+  }
+}
+
+export default InitService;
+
+
+src/utils/logger.ts
+const logger = {
+    info: (message: string, ...args: any[]) => {
+      console.log(`[INFO] ${message}`, ...args);
+    },
+    error: (message: string, ...args: any[]) => {
+      console.error(`[ERROR] ${message}`, ...args);
+    },
+    warning: (message: string, ...args: any[]) => {
+      console.warn(`[WARNING] ${message}`, ...args);
+    },
+    debug: (message: string, ...args: any[]) => {
+      if (process.env.NODE_ENV !== 'production') {
+        console.debug(`[DEBUG] ${message}`, ...args);
+      }
+    }
+  };
+  
+  export default logger;
+
